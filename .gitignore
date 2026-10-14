@@ -1,0 +1,36 @@
+# Local game library and user data (may contain private paths)
+/data/
+
+# Generated portable packages and download/build caches
+/release/
+/.build-tools/
+/vendor/GARbro-Mod/packages/
+/vendor/GARbro-Mod/bin/
+/vendor/GARbro-Mod/**/obj/
+
+# IDE and compiler scratch files
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.suo
+*.sln.docstates
+*.cache
+
+# Python test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local test programs and interrupted exports
+/UiSmoke.exe
+/WpfSmoke.exe
+/WpfSmoke.exe.config
+/galtools-fuyin-smoke.exe
+/tests/*.exe
+/tests/*.exe.config
+*.galtools-partial
+*.partial
+
+# Keep galtools.exe, runtime/garbro-mod and Formats.dat tracked:
+# a Windows clone can run the app without external unpacking tools.
