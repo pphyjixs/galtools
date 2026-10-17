@@ -48,3 +48,11 @@ galtools 把“封包结构”、“游戏密钥”和“资源解码”分开�
 打开 `galtools.exe` → 资源浏览 → 打开文件夹 → 选游戏目录 → 双击 `.paz`。`bg.pazA` 等分卷由 `bg.paz` 自动读取；不需要单独打开。选择图片后可预览、保存原文件或转换 PNG；“导出全部”导出当前封包。`scripts/extract-soreyori.py` 可一次导出该游戏所有 `.paz`，它是可选的 Python 批处理入口；桌面软件本身无需 Python。
 
 方案密钥与 PAZ 结构的参考实现：项目内 `vendor/GARbro-Mod/ArcFormats/Musica/ArcPAZ.cs`，以及 [FuckGalEngine 的 minori PAZ 工具源码](https://github.com/Inori/FuckGalEngine/blob/master/Minori/Minori/fuckpaz/main.cpp)。
+
+## 《恋爱、初邂逅 / 恋愛、はじめまして》
+
+原版资源使用标准 XP3 索引，文件名不加密，资源数据采用 31 字节循环 XOR。通过静态检查游戏自带的 `plugin/koihazi.tpm`，确认其算法与已有的 `MadoCrypt(0)` 一致。因此只在 `Formats.dat` 中新增 `Ren'ai, Hajimemashite` 方案，以及 `恋愛、はじめまして.exe` 的作品映射；不新增封包后端，不加载或分发游戏插件。
+
+运行 `scripts/update-formats.ps1` 会幂等应用目前所有 galtools 方案扩展。维护工具也支持 `apply-koihaji` 单独更新本作。资源浏览中打开游戏目录、双击 XP3 即可自动识别；若启动程序被改名，可手动选择 `Ren'ai, Hajimemashite`。汉化 `patch.xp3` 的未加密条目仍按索引标志读取。
+
+可选批量导出入口：`python scripts/extract-xp3.py GAME_DIRECTORY OUTPUT_DIRECTORY`。该脚本使用项目内桥接器，为每个 XP3 建独立子目录，保留原文件名和格式，并生成导出汇总；不会覆盖已有文件。桌面预览、保存及转换无需 Python。

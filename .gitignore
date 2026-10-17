@@ -4,6 +4,10 @@
 # Generated portable packages and download/build caches
 /release/
 /.build-tools/
+/.analysis/
+/artifacts/
+/logs/
+/tools/.downloads/
 /vendor/GARbro-Mod/packages/
 /vendor/GARbro-Mod/bin/
 /vendor/GARbro-Mod/**/obj/
@@ -16,11 +20,20 @@
 *.suo
 *.sln.docstates
 *.cache
+**/bin/
+**/obj/
+*.log
+*.tmp
+.env
+.env.*
+!.env.example
 
 # Python test caches
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
+venv/
 
 # Local test programs and interrupted exports
 /UiSmoke.exe
@@ -29,8 +42,11 @@ __pycache__/
 /galtools-fuyin-smoke.exe
 /tests/*.exe
 /tests/*.exe.config
+/runtime/garbro-mod/Galtools.FormatData.exe
+/runtime/garbro-mod/Galtools.FormatData.pdb
 *.galtools-partial
 *.partial
 
 # Keep galtools.exe, runtime/garbro-mod and Formats.dat tracked:
 # a Windows clone can run the app without external unpacking tools.
+# Keep source, scripts, docs, assets, and deliberately bundled tools tracked.

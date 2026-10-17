@@ -50,7 +50,7 @@ namespace Galtools
         public BitmapSource Cover { get { return CoverLoader == null ? null : CoverLoader(Record); } }
     }
 
-    internal sealed class DesktopApp
+    internal sealed partial class DesktopApp
     {
         private readonly Window window;
         private readonly List<GameRecord> games;
@@ -63,11 +63,15 @@ namespace Galtools
         private List<ResourceItem> visibleItems = new List<ResourceItem>();
         private List<GameView> gameViews = new List<GameView>();
         private readonly Dictionary<string, BitmapSource> coverCache = new Dictionary<string, BitmapSource>(StringComparer.OrdinalIgnoreCase);
-        private readonly List<Border>[] cards = { new List<Border>(), new List<Border>(), new List<Border>() };
-        private readonly double[] flow = { 42, 139, 88 };
+        private readonly List<List<Border>> cards = new List<List<Border>>();
+        private double wallDistance;
+        private readonly List<Canvas> lanes = new List<Canvas>();
+        private int wallColumns;
+        private double wallCardHeight, wallStep;
+        private bool libraryMode;
         private readonly Stopwatch animationClock = Stopwatch.StartNew();
         private double previousFrame;
-        private bool manualPause, resources, rebuilding, gridMode, closing, previewBusy, thumbnailBusy;
+        private bool manualPause, resources, settings, rebuilding, gridMode, closing, previewBusy, thumbnailBusy;
         private int previewVersion, navigationVersion, tilePage;
         private volatile bool exportCancelled;
         private SoundPlayer player;
@@ -77,7 +81,7 @@ namespace Galtools
 
         internal Window Window { get { return window; } }
         private T C<T>(string name) where T : class { return window.FindName(name) as T; }
-        private static Brush B(string color) { return (Brush)new BrushConverter().ConvertFromString(color); }
+        private static Brush B(string color) { return (Brush)new BrushConverter().ConvertFromString(darkTheme ? DarkColor(color) : color); }
         private static TextBlock Text(string text, double size, string color, bool bold = false)
         {
             return new TextBlock { Text = text, FontSize = size, Foreground = B(color), FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal, TextWrapping = TextWrapping.Wrap };
@@ -88,18 +92,24 @@ namespace Galtools
             using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Galtools.Shell.xaml")) window = (Window)XamlReader.Load(stream);
             window.Width = Math.Min(1440, SystemParameters.WorkArea.Width - 32);
             window.Height = Math.Min(900, SystemParameters.WorkArea.Height - 32);
+            preferences = UiSettingsStore.Load();
+            darkTheme = preferences.DarkTheme;
+            ApplyTheme();
             try { games = GameStore.Load(); } catch { games = new List<GameRecord>(); }
             try { schemes = GarbroModClient.ListSchemes(); } catch { schemes = new List<string>(); }
             Wire();
+            RefreshSidebarImages();
             RefreshGames();
             string initial = games.Where(g => Directory.Exists(g.Folder)).Select(g => g.Folder).FirstOrDefault() ?? AppDomain.CurrentDomain.BaseDirectory;
             NavigateFolder(Directory.Exists(initial) ? initial : AppDomain.CurrentDomain.BaseDirectory, true);
             CompositionTarget.Rendering += RenderWall;
             thumbnailTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(140) };
             thumbnailTimer.Tick += delegate { LoadOneThumbnail(); }; thumbnailTimer.Start();
+            StartSidebarTimer();
             window.Closed += delegate {
+                StopUnpackNotice();
                 closing = true; ++previewVersion; ++navigationVersion; exportCancelled = true;
-                thumbnailTimer.Stop(); CompositionTarget.Rendering -= RenderWall; StopAudio();
+                thumbnailTimer.Stop(); if (sidebarTimer != null) sidebarTimer.Stop(); CompositionTarget.Rendering -= RenderWall; StopAudio();
                 var old = archive; archive = null; if (old != null) Task.Run(() => old.Dispose());
             };
             window.PreviewKeyDown += delegate(object sender, KeyEventArgs e) {
@@ -111,8 +121,11 @@ namespace Galtools
         {
             SetButton("NavGames", "game", "游戏管理", () => ShowPage(false));
             SetButton("NavResources", "folder", "资源浏览", () => ShowPage(true));
+            SetButton("NavSettings", "settings", "设置", ShowSettings);
             SetButton("AddGame", "plus", "添加游戏", () => EditGame(null));
             C<Button>("EmptyAdd").Click += delegate { EditGame(null); };
+            C<Button>("ModeFlow").Click += delegate { SetLibraryMode(false); };
+            C<Button>("ModeLibrary").Click += delegate { SetLibraryMode(true); };
             SetButton("PauseWall", "pause", "暂停流动", delegate { manualPause = !manualPause; ButtonContent(C<Button>("PauseWall"), manualPause ? "play" : "pause", manualPause ? "继续流动" : "暂停流动"); });
             C<TextBox>("GameSearch").TextChanged += delegate { if (!rebuilding) RefreshGames(); };
             C<ComboBox>("GameCategory").SelectionChanged += delegate { if (!rebuilding) RefreshGames(); };
@@ -147,7 +160,8 @@ namespace Galtools
             C<Button>("PlayAudio").Click += delegate { try { if (player != null) player.Play(); } catch (Exception ex) { Error(ex.Message); } };
             SetButton("ExpandPreview", "expand", "", ExpandPreview);
             SetButton("CloseModal", "close", "", CloseModal);
-            C<Canvas>("Lane0").SizeChanged += delegate { LayoutWall(); };
+            C<Grid>("WallViewport").SizeChanged += delegate { LayoutWall(); LayoutLibrary(); };
+            WireSettings();
             C<TreeView>("Directories").SelectedItemChanged += delegate {
                 if (rebuilding) return;
                 var node = C<TreeView>("Directories").SelectedItem as TreeViewItem;
@@ -170,7 +184,11 @@ namespace Galtools
             var panel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             var path = Icon(icon, 17, null); path.SetBinding(Shape.StrokeProperty, new System.Windows.Data.Binding("Foreground") { Source = button });
             panel.Children.Add(path);
-            if (label.Length > 0) panel.Children.Add(new TextBlock { Text = label, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Foreground = button.Foreground });
+            if (label.Length > 0) {
+                var caption = new TextBlock { Text = label, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+                caption.SetBinding(TextBlock.ForegroundProperty, new System.Windows.Data.Binding("Foreground") { Source = button });
+                panel.Children.Add(caption);
+            }
             button.Content = panel;
             System.Windows.Automation.AutomationProperties.SetName(button, label.Length > 0 ? label : icon);
         }
@@ -194,6 +212,8 @@ namespace Galtools
                 case "download": d = "M10,1 L10,13 M5,8 L10,13 L15,8 M2,13 L2,19 L18,19 L18,13"; break;
                 case "expand": d = "M2,8 L2,2 L8,2 M12,2 L18,2 L18,8 M18,12 L18,18 L12,18 M8,18 L2,18 L2,12"; break;
                 case "edit": d = "M3,14 L2,19 L7,18 L18,7 L13,2 Z M11,4 L16,9"; break;
+                case "copy": d = "M7,6 L18,6 L18,19 L7,19 Z M13,6 L13,1 L2,1 L2,14 L7,14"; break;
+                case "settings": d = "M10,2 L12,2 L13,5 L15,6 L18,5 L19,8 L17,10 L17,12 L19,14 L18,17 L15,16 L13,17 L12,20 L8,20 L7,17 L5,16 L2,17 L1,14 L3,12 L3,10 L1,8 L2,5 L5,6 L7,5 L8,2 Z M10,7 A3,3 0 1 0 10,13 A3,3 0 1 0 10,7"; break;
                 default: d = "M3,1 L12,1 L18,7 L18,19 L3,19 Z M12,1 L12,7 L18,7 M6,11 L14,11 M6,15 L12,15"; break;
             }
             return new System.Windows.Shapes.Path { Data = Geometry.Parse(d), Width = size, Height = size, Stretch = Stretch.Uniform, Stroke = color ?? B("#468CFA"), StrokeThickness = 1.6, StrokeLineJoin = PenLineJoin.Round, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round, VerticalAlignment = VerticalAlignment.Center };
@@ -201,11 +221,11 @@ namespace Galtools
 
         private void ShowPage(bool showResources)
         {
-            resources = showResources;
+            settings = false; resources = showResources;
             C<Grid>("GamesPage").Visibility = resources ? Visibility.Collapsed : Visibility.Visible;
             C<Grid>("ResourcesPage").Visibility = resources ? Visibility.Visible : Visibility.Collapsed;
-            C<Button>("NavGames").Tag = resources ? "" : "active"; C<Button>("NavResources").Tag = resources ? "active" : "";
-            ButtonContent(C<Button>("NavGames"), "game", "游戏管理"); ButtonContent(C<Button>("NavResources"), "folder", "资源浏览");
+            C<Grid>("SettingsPage").Visibility = Visibility.Collapsed;
+            UpdateNavigation();
         }
 
         private BitmapSource Cover(GameRecord game)
@@ -233,31 +253,33 @@ namespace Galtools
             if (category != "全部游戏") view = view.Where(g => (g.Tags ?? "").Split(new[] { ',', '，' }).Any(s => s.Trim() == category));
             if (C<ComboBox>("GameSort").SelectedIndex == 1) view = view.OrderBy(g => g.Title);
             gameViews = view.Select(g => new GameView { Record = g, CoverLoader = Cover }).ToList();
+            wallDistance = 0;
             C<TextBlock>("GameCount").Text = games.Count + " 部收藏";
             C<Border>("EmptyLibrary").Visibility = gameViews.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            for (int lane = 0; lane < 3; lane++) { C<Canvas>("Lane" + lane).Children.Clear(); cards[lane].Clear(); }
-            rebuilding = false; LayoutWall();
+            foreach (var lane in lanes) lane.Children.Clear();
+            foreach (var laneCards in cards) laneCards.Clear();
+            rebuilding = false; LayoutWall(); LayoutLibrary();
         }
 
-        private Border CreateGameCard()
+        private Border CreateGameCard(double height, double imageHeight, bool compact)
         {
-            var card = new Border { Height = 272, CornerRadius = new CornerRadius(15), Background = Brushes.White, BorderBrush = B("#E2E9F5"), BorderThickness = new Thickness(1), Cursor = Cursors.Hand, Focusable = true };
+            var card = new Border { Height = height, CornerRadius = new CornerRadius(15), Background = (Brush)window.FindResource("CardSurface"), BorderBrush = B("#E2E9F5"), BorderThickness = new Thickness(1), Cursor = Cursors.Hand, Focusable = true };
             card.Effect = new System.Windows.Media.Effects.DropShadowEffect { Color = Color.FromRgb(97, 129, 180), BlurRadius = 12, ShadowDepth = 3, Opacity = .09 };
-            var content = new Grid(); content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(161) }); content.RowDefinitions.Add(new RowDefinition());
+            var content = new Grid(); content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(imageHeight) }); content.RowDefinitions.Add(new RowDefinition());
             var cover = new Border { Background = (Brush)window.FindResource("SoftFill"), CornerRadius = new CornerRadius(14, 14, 0, 0), ClipToBounds = true };
             var coverGrid = new Grid(); var coverLabel = Text("GALTOOLS  /  COLLECTION", 12, "#94A6C7"); coverLabel.HorizontalAlignment = HorizontalAlignment.Center; coverLabel.VerticalAlignment = VerticalAlignment.Center;
             coverGrid.Children.Add(coverLabel);
             var image = new Image { Stretch = Stretch.UniformToFill }; image.SetBinding(Image.SourceProperty, "Cover"); RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality); coverGrid.Children.Add(image); cover.Child = coverGrid;
             cover.SizeChanged += delegate { cover.Clip = new RectangleGeometry(new Rect(0,0,cover.ActualWidth,cover.ActualHeight), 14, 14); };
             content.Children.Add(cover);
-            var footer = new Grid { Margin = new Thickness(15, 10, 15, 11) }; Grid.SetRow(footer, 1);
-            footer.RowDefinitions.Add(new RowDefinition { Height = new GridLength(25) }); footer.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) }); footer.RowDefinitions.Add(new RowDefinition());
-            var title = new TextBlock { FontSize = 16, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis }; title.SetBinding(TextBlock.TextProperty, "Title"); footer.Children.Add(title);
-            var folderText = new TextBlock { FontSize = 11, Foreground = B("#7B8AA3"), TextTrimming = TextTrimming.CharacterEllipsis }; folderText.SetBinding(TextBlock.TextProperty, "Folder"); Grid.SetRow(folderText, 1); footer.Children.Add(folderText);
-            var tag = new Border { Background = B("#FCEBF3"), CornerRadius = new CornerRadius(8), Padding = new Thickness(9, 4, 9, 4), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, MaxWidth = 115 };
+            var footer = new Grid { Margin = new Thickness(compact ? 10 : 15, compact ? 7 : 10, compact ? 10 : 15, compact ? 8 : 11) }; Grid.SetRow(footer, 1);
+            footer.RowDefinitions.Add(new RowDefinition { Height = new GridLength(compact ? 22 : 25) }); footer.RowDefinitions.Add(new RowDefinition { Height = new GridLength(compact ? 0 : 22) }); footer.RowDefinitions.Add(new RowDefinition());
+            var title = new TextBlock { FontSize = compact ? 13 : 16, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis }; title.SetBinding(TextBlock.TextProperty, "Title"); footer.Children.Add(title);
+            var folderText = new TextBlock { FontSize = 11, Foreground = B("#7B8AA3"), TextTrimming = TextTrimming.CharacterEllipsis, Visibility = compact ? Visibility.Collapsed : Visibility.Visible }; folderText.SetBinding(TextBlock.TextProperty, "Folder"); Grid.SetRow(folderText, 1); footer.Children.Add(folderText);
+            var tag = new Border { Background = B("#FCEBF3"), CornerRadius = new CornerRadius(8), Padding = new Thickness(compact ? 5 : 9, 4, compact ? 5 : 9, 4), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, MaxWidth = compact ? 75 : 115 };
             var tagText = new TextBlock { FontSize = 10, Foreground = B("#CE6D99"), TextTrimming = TextTrimming.CharacterEllipsis }; tagText.SetBinding(TextBlock.TextProperty, "Tag"); tag.Child = tagText; Grid.SetRow(tag, 2); footer.Children.Add(tag);
-            var play = new Button { Style = (Style)window.FindResource("PrimaryButton"), Padding = new Thickness(10, 5, 10, 5), MinHeight = 30, HorizontalAlignment = HorizontalAlignment.Right, FontSize = 11 };
-            ButtonContent(play, "play", "启动游戏"); Grid.SetRow(play, 2); footer.Children.Add(play);
+            var play = new Button { Style = (Style)window.FindResource("PrimaryButton"), Padding = new Thickness(compact ? 6 : 10, 5, compact ? 6 : 10, 5), MinHeight = 29, HorizontalAlignment = HorizontalAlignment.Right, FontSize = 11 };
+            ButtonContent(play, "play", compact ? "" : "启动游戏"); play.ToolTip = "启动游戏"; Grid.SetRow(play, 2); footer.Children.Add(play);
             play.Click += delegate(object sender, RoutedEventArgs e) { var g = card.DataContext as GameView; if (g != null) LaunchGame(g.Record); e.Handled = true; };
             content.Children.Add(footer); card.Child = content;
             card.MouseLeftButtonUp += delegate(object sender, MouseButtonEventArgs e) { if (e.OriginalSource is Button) return; var g = card.DataContext as GameView; if (g != null) ShowGame(g.Record); e.Handled = true; };
@@ -266,54 +288,95 @@ namespace Galtools
             return card;
         }
 
+        private int ColumnCount(double width)
+        {
+            int n = gameViews.Count;
+            int target = n <= 10 ? 3 : n <= 18 ? 4 : n <= 30 ? 5 : n <= 50 ? 6 : n <= 80 ? 7 : 8;
+            int fit = Math.Max(1, (int)Math.Floor(Math.Max(300, width) / 178));
+            return Math.Min(target, fit);
+        }
         private void LayoutWall()
         {
-            if (gameViews.Count == 0) return;
-            int needed = (int)Math.Ceiling(C<Grid>("WallViewport").ActualHeight / 290) + 3;
-            for (int lane = 0; lane < 3; lane++) {
-                var canvas = C<Canvas>("Lane" + lane);
-                while (cards[lane].Count < needed) { var card = CreateGameCard(); cards[lane].Add(card); canvas.Children.Add(card); }
-                for (int i = 0; i < cards[lane].Count; i++) cards[lane][i].Width = Math.Max(100, canvas.ActualWidth - 8);
+            if (gameViews.Count == 0 || libraryMode) return;
+            var viewport = C<Grid>("WallViewport");
+            if (viewport.ActualWidth < 200 || viewport.ActualHeight < 100) return;
+            int count = ColumnCount(viewport.ActualWidth);
+            double width = Math.Max(150, viewport.ActualWidth / count - 14);
+            double height = Math.Max(192, Math.Min(272, width * .67 + 80));
+            double step = height + 15;
+            bool changed = count != wallColumns || Math.Abs(height - wallCardHeight) > 3;
+            if (changed) {
+                var host = C<Grid>("FlowColumns"); host.Children.Clear(); host.ColumnDefinitions.Clear();
+                cards.Clear(); lanes.Clear();
+                wallColumns = count; wallCardHeight = height; wallStep = step;
+                for (int lane = 0; lane < count; lane++) {
+                    host.ColumnDefinitions.Add(new ColumnDefinition());
+                    var canvas = new Canvas { ClipToBounds = true, Margin = new Thickness(7,0,7,0) };
+                    Grid.SetColumn(canvas, lane); host.Children.Add(canvas); lanes.Add(canvas);
+                    cards.Add(new List<Border>());
+                }
+            }
+            int needed = (int)Math.Ceiling((viewport.ActualHeight + wallCardHeight) / wallStep) + 2;
+            for (int lane = 0; lane < wallColumns; lane++) {
+                var canvas = lanes[lane]; var list = cards[lane];
+                while (list.Count < needed) { var card = CreateGameCard(wallCardHeight, wallCardHeight * .59, wallColumns >= 4); list.Add(card); canvas.Children.Add(card); }
+                while (list.Count > needed) { canvas.Children.Remove(list[list.Count - 1]); list.RemoveAt(list.Count - 1); }
+                foreach (var card in list) card.Width = width;
             }
             PositionWall();
         }
         private static int Mod(int n, int m) { return (n % m + m) % m; }
         private void PositionWall()
         {
-            if (gameViews.Count == 0) return;
+            if (gameViews.Count == 0 || libraryMode || wallColumns == 0) return;
             var source = PresentationSource.FromVisual(window); double dpi = source == null ? 1 : source.CompositionTarget.TransformToDevice.M22;
-            for (int lane = 0; lane < 3; lane++) {
-                double signed = lane == 1 ? flow[lane] : -flow[lane];
-                int first = (int)Math.Floor(-signed / 290) - 1;
+            double viewportHeight = C<Grid>("WallViewport").ActualHeight;
+            // A single conveyor runs up column 0, down column 1, and so on.
+            // A segment includes the card height: it fully exits before entering
+            // the next column. Offscreen queue entries complete the cyclic order.
+            double travel = viewportHeight + wallCardHeight;
+            for (int lane = 0; lane < wallColumns; lane++) {
+                double start = lane * travel;
+                int first = (int)Math.Floor((start - wallDistance) / wallStep);
                 for (int slot = 0; slot < cards[lane].Count; slot++) {
                     int row = first + slot;
-                    int index = Mod(row + lane * Math.Max(1, gameViews.Count / 3), gameViews.Count);
-                    var card = cards[lane][slot]; if (!object.ReferenceEquals(card.DataContext, gameViews[index])) card.DataContext = gameViews[index];
-                    Canvas.SetLeft(card, 4); Canvas.SetTop(card, Math.Round((row * 290 + signed) * dpi) / dpi);
+                    double progress = row * wallStep + wallDistance - start;
+                    var card = cards[lane][slot];
+                    bool visible = progress >= 0 && progress < travel;
+                    card.Visibility = visible ? Visibility.Visible : Visibility.Hidden;
+                    if (!visible) continue;
+                    int index = Mod(-row, gameViews.Count);
+                    if (!object.ReferenceEquals(card.DataContext, gameViews[index])) card.DataContext = gameViews[index];
+                    double top = lane % 2 == 0 ? viewportHeight - progress : progress - wallCardHeight;
+                    Canvas.SetLeft(card, 0); Canvas.SetTop(card, Math.Round(top * dpi) / dpi);
                 }
             }
         }
         private void RenderWall(object sender, EventArgs e)
         {
             double now = animationClock.Elapsed.TotalSeconds; double dt = Math.Min(.08, now - previousFrame); previousFrame = now;
-            if (resources || manualPause || !window.IsActive || C<Border>("ModalOverlay").Visibility == Visibility.Visible || gameViews.Count == 0) return;
-            flow[0] += dt * 23; flow[1] += dt * 18; flow[2] += dt * 27; PositionWall();
+            if (resources || settings || libraryMode || manualPause || !window.IsActive || C<Border>("ModalOverlay").Visibility == Visibility.Visible || gameViews.Count == 0) return;
+            if (wallStep <= 0) return;
+            wallDistance = (wallDistance + dt * (25 + Math.Min(20, gameViews.Count))) % (gameViews.Count * wallStep);
+            PositionWall();
         }
 
         private void ShowModal(string title)
         {
+            StopUnpackNotice();
             C<TextBlock>("ModalTitle").Text = title; C<StackPanel>("ModalBody").Children.Clear();
             C<Border>("ModalCard").MaxHeight = Math.Max(400, (window.ActualHeight > 0 ? window.ActualHeight : window.Height) - 90);
             C<Border>("ModalOverlay").Visibility = Visibility.Visible;
-            C<Grid>("GamesPage").IsEnabled = false; C<Grid>("ResourcesPage").IsEnabled = false;
-            C<Button>("NavGames").IsEnabled = false; C<Button>("NavResources").IsEnabled = false;
+            C<Grid>("GamesPage").IsEnabled = false; C<Grid>("ResourcesPage").IsEnabled = false; C<Grid>("SettingsPage").IsEnabled = false;
+            C<Button>("NavGames").IsEnabled = false; C<Button>("NavResources").IsEnabled = false; C<Button>("NavSettings").IsEnabled = false;
             C<Button>("CloseModal").Focus();
         }
         private void CloseModal()
         {
+            StopUnpackNotice();
             C<Border>("ModalOverlay").Visibility = Visibility.Collapsed; C<StackPanel>("ModalBody").Children.Clear();
-            C<Grid>("GamesPage").IsEnabled = true; C<Grid>("ResourcesPage").IsEnabled = true;
-            C<Button>("NavGames").IsEnabled = true; C<Button>("NavResources").IsEnabled = true;
+            C<Grid>("GamesPage").IsEnabled = true; C<Grid>("ResourcesPage").IsEnabled = true; C<Grid>("SettingsPage").IsEnabled = true;
+            C<Button>("NavGames").IsEnabled = true; C<Button>("NavResources").IsEnabled = true; C<Button>("NavSettings").IsEnabled = true;
         }
         private Button ActionButton(string label, string icon, string style, Action action)
         {
@@ -341,6 +404,7 @@ namespace Galtools
                 if (MessageBox.Show(window, "从游戏库移除「" + game.Title + "」？游戏文件会保留。", "移除游戏", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
                 games.Remove(game); SaveGames(); CloseModal(); RefreshGames();
             })); body.Children.Add(actions);
+            AddUnpackPromptAction(body, game);
         }
         private static void AddInfo(Panel panel, string label, string value)
         {
