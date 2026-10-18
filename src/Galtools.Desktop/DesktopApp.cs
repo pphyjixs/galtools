@@ -416,8 +416,8 @@ namespace Galtools
             ShowModal(original == null ? "添加游戏" : "编辑游戏"); var body = C<StackPanel>("ModalBody");
             var title = EditField(body, "游戏名称", original == null ? "" : original.Title, "给这段故事起个名字", null);
             TextBox dir = null, exe = null, cover = null;
-            dir = EditField(body, "游戏目录", original == null ? "" : original.Folder, "选择游戏所在的文件夹", delegate { var p = PickFolder(); if (p != null) dir.Text = p; });
-            exe = EditField(body, "启动程序", original == null ? "" : original.Executable, "绑定游戏的 EXE", delegate { var d = new OpenFileDialog { Filter = "启动程序|*.exe|全部文件|*.*" }; if (d.ShowDialog(window) == true) { exe.Text = d.FileName; if (dir.Text.Length == 0) dir.Text = IOPath.GetDirectoryName(d.FileName); if (title.Text.Length == 0) title.Text = IOPath.GetFileNameWithoutExtension(d.FileName); } });
+            exe = EditField(body, "启动程序", original == null ? "" : original.Executable, "绑定游戏的 EXE", delegate { var d = new OpenFileDialog { Filter = "启动程序|*.exe|全部文件|*.*" }; if (d.ShowDialog(window) == true) { exe.Text = d.FileName; dir.Text = IOPath.GetDirectoryName(d.FileName); if (title.Text.Length == 0) title.Text = IOPath.GetFileNameWithoutExtension(d.FileName); } });
+            dir = EditField(body, "游戏目录", original == null ? "" : original.Folder, "选择启动程序后自动填写，也可手动修改", delegate { var p = PickFolder(); if (p != null) dir.Text = p; });
             cover = EditField(body, "封面图片", original == null ? "" : original.CoverPath, "留空时尝试使用游戏目录中的图片", delegate { var d = new OpenFileDialog { Filter = "封面图片|*.png;*.jpg;*.jpeg;*.bmp;*.gif" }; if (d.ShowDialog(window) == true) cover.Text = d.FileName; });
             body.Children.Add(new TextBlock { Text = "解密方案", FontSize = 12, Foreground = B("#7D8BA5"), Margin = new Thickness(0,3,0,7) });
             var scheme = new ComboBox { IsEditable = true, ItemsSource = new[] { "自动" }.Concat(schemes).ToList(), Text = original == null || string.IsNullOrWhiteSpace(original.Scheme) ? "自动" : original.Scheme, Margin = new Thickness(0,0,0,12) }; body.Children.Add(scheme);
